@@ -1,15 +1,13 @@
 # App Store workflow for PosApp.
 #
 # One-time setup in Codemagic before the first build:
-# 1. Team settings > Integrations: add an App Store Connect API key
-#    named exactly "codemagic", with App Manager access.
-# 2. Team settings > codemagic.yaml settings > Code signing identities:
-#    fetch an Apple Distribution certificate and an App Store profile
-#    for bundle id com.RegmPos.app.
-# 3. Create the app record in App Store Connect for com.RegmPos.app
+# 1. Team settings > Integrations: Apple Developer Portal key named "PosApp"
+#    (Key ID DRJXRNQ58Z). The build fetches the distribution certificate
+#    and App Store profile for com.RegmPos.app from that key.
+# 2. Create the app record in App Store Connect for com.RegmPos.app
 #    (screenshots, privacy policy, and category are still required
 #    before Apple will accept a review submission).
-# 4. On this app, click Check for configuration file, then start
+# 3. On this app, click Check for configuration file, then start
 #    "iOS App Store".
 #
 # Optional push config: add a secret variable group named "firebase"
@@ -23,11 +21,10 @@ workflows:
     max_build_duration: 120
     instance_type: mac_mini_m2
     integrations:
-      app_store_connect: codemagic
+      app_store_connect: PosApp
     environment:
-      ios_signing:
-        distribution_type: app_store
-        bundle_identifier: com.RegmPos.app
+      vars:
+        BUNDLE_ID: com.RegmPos.app
       flutter: stable
       xcode: latest
       cocoapods: default
@@ -36,6 +33,15 @@ workflows:
         - $HOME/.pub-cache
         - $CM_BUILD_DIR/ios/Pods
     scripts:
+      - name: Initialize keychain
+        script: keychain initialize
+      - name: Fetch App Store signing files
+        script: |
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create
+      - name: Add certificates to keychain
+        script: keychain add-certificates
       - name: Set up code signing settings on Xcode project
         script: xcode-project use-profiles
       - name: Get Flutter packages
