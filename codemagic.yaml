@@ -2,12 +2,14 @@
 #
 # One-time setup in Codemagic before the first build:
 # 1. Team settings > Integrations: Apple Developer Portal key named "PosApp"
-#    (Key ID DRJXRNQ58Z). The build fetches the distribution certificate
-#    and App Store profile for com.RegmPos.app from that key.
-# 2. Create the app record in App Store Connect for com.RegmPos.app
+#    (Key ID DRJXRNQ58Z).
+# 2. App settings > Environment variables: secret group
+#    "app_store_credentials" containing CERTIFICATE_PRIVATE_KEY
+#    (the RSA private key Codemagic uses to create the distribution certificate).
+# 3. Create the app record in App Store Connect for com.RegmPos.app
 #    (screenshots, privacy policy, and category are still required
 #    before Apple will accept a review submission).
-# 3. On this app, click Check for configuration file, then start
+# 4. On this app, click Check for configuration file, then start
 #    "iOS App Store".
 #
 # Optional push config: add a secret variable group named "firebase"
@@ -23,6 +25,8 @@ workflows:
     integrations:
       app_store_connect: PosApp
     environment:
+      groups:
+        - app_store_credentials
       vars:
         BUNDLE_ID: com.RegmPos.app
       flutter: stable
