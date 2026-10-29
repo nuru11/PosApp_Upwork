@@ -94,4 +94,14 @@ void main() {
 
     expect(request.paperWidthMm, isNull);
   });
+
+  test('includes non-blocking warnings in successful print results', () {
+    final result = PrintResult.success(
+      jobId: 'job-1',
+      printer: '192.168.1.50',
+      warning: 'Receipt archive unavailable.',
+    );
+
+    expect(result.toJson()['warning'], 'Receipt archive unavailable.');
+  });
 }

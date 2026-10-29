@@ -7,18 +7,34 @@ import 'package:path_provider/path_provider.dart';
 /// intrinsic page size preserved, can be inspected by the operator to verify
 /// the layout produced by the print pipeline.
 class ReceiptArchive {
-  const ReceiptArchive();
+  ReceiptArchive({
+    bool? isAndroid,
+    Future<Directory?> Function()? externalStorageDirectoryProvider,
+    Future<Directory> Function()? applicationDocumentsDirectoryProvider,
+  }) : _isAndroid = isAndroid ?? Platform.isAndroid,
+       _externalStorageDirectoryProvider =
+           externalStorageDirectoryProvider ?? getExternalStorageDirectory,
+       _applicationDocumentsDirectoryProvider =
+           applicationDocumentsDirectoryProvider ??
+           getApplicationDocumentsDirectory;
 
   static const _folderName = 'Receipts';
+
+  final bool _isAndroid;
+  final Future<Directory?> Function() _externalStorageDirectoryProvider;
+  final Future<Directory> Function() _applicationDocumentsDirectoryProvider;
 
   Future<File> save({
     required String fileName,
     required Uint8List bytes,
   }) async {
-    final base =
-        await getExternalStorageDirectory() ??
-        await getApplicationDocumentsDirectory();
-    final folder = Directory('${base.path}${Platform.pathSeparator}$_folderName');
+    final base = _isAndroid
+        ? await _externalStorageDirectoryProvider() ??
+              await _applicationDocumentsDirectoryProvider()
+        : await _applicationDocumentsDirectoryProvider();
+    final folder = Directory(
+      '${base.path}${Platform.pathSeparator}$_folderName',
+    );
     if (!await folder.exists()) {
       await folder.create(recursive: true);
     }

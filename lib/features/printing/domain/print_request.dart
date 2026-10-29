@@ -49,25 +49,6 @@ class PrintRequest {
   final int? printerPort;
   final String? printerProtocol;
 
-  PrintRequest copyWith({
-    String? printerName,
-    String? printerIp,
-    int? printerPort,
-    String? printerProtocol,
-    double? paperWidthMm,
-  }) {
-    return PrintRequest(
-      html: html,
-      title: title,
-      paperWidthMm: paperWidthMm ?? this.paperWidthMm,
-      jobId: jobId,
-      printerName: printerName ?? this.printerName,
-      printerIp: printerIp ?? this.printerIp,
-      printerPort: printerPort ?? this.printerPort,
-      printerProtocol: printerProtocol ?? this.printerProtocol,
-    );
-  }
-
   static Map<String, Object?> _asMap(Object? value) =>
       value is Map ? Map<String, Object?>.from(value) : const {};
 
@@ -105,19 +86,22 @@ class PrintResult {
     required this.jobId,
     required this.printer,
     this.archivedPath,
+    this.warning,
   }) : success = true,
        error = null;
 
   const PrintResult.failure({required this.jobId, required this.error})
     : success = false,
       printer = null,
-      archivedPath = null;
+      archivedPath = null,
+      warning = null;
 
   final bool success;
   final String? jobId;
   final String? printer;
   final String? archivedPath;
   final String? error;
+  final String? warning;
 
   Map<String, Object?> toJson() => {
     'success': success,
@@ -125,5 +109,6 @@ class PrintResult {
     'printer': printer,
     'archivedPath': archivedPath,
     'error': error,
+    'warning': warning,
   };
 }

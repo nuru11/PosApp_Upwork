@@ -24,7 +24,6 @@ class _PosWebViewPageState extends State<PosWebViewPage> {
   InAppWebViewController? _controller;
   int _progress = 0;
   String? _error;
-  bool _webCanGoBack = false;
   late final VoidCallback _pushTokenListener;
 
   @override
@@ -47,25 +46,14 @@ class _PosWebViewPageState extends State<PosWebViewPage> {
   @override
   Widget build(BuildContext context) {
     return PopScope(
-      canPop: !_webCanGoBack,
+      canPop: false,
       onPopInvokedWithResult: (didPop, result) async {
-        if (didPop) return;
-        if (await _controller?.canGoBack() == true) {
+        if (!didPop && await _controller?.canGoBack() == true) {
           await _controller?.goBack();
-          await _syncWebHistory();
         }
       },
       child: Scaffold(
-        appBar: AppBar(
-          title: const Text('نقطة البيع'),
-          leading: IconButton(
-            tooltip: 'الإعدادات',
-            onPressed: _returnToTerminal,
-            icon: const Icon(Icons.settings_outlined),
-          ),
-        ),
         body: SafeArea(
-          top: false,
           bottom: false,
           child: Stack(
             children: [
@@ -85,13 +73,7 @@ class _PosWebViewPageState extends State<PosWebViewPage> {
                   widget.printBridge.register(controller);
                   _publishPushTokenToWeb();
                 },
-                onLoadStop: (_, _) {
-                  _publishPushTokenToWeb();
-                  _syncWebHistory();
-                },
-                onUpdateVisitedHistory: (_, _, _) {
-                  _syncWebHistory();
-                },
+                onLoadStop: (_, _) => _publishPushTokenToWeb(),
                 shouldOverrideUrlLoading: (controller, action) async {
                   final url = action.request.url;
                   if (url == null || url.host == _allowedHost) {
@@ -125,24 +107,6 @@ class _PosWebViewPageState extends State<PosWebViewPage> {
     );
   }
 
-  Future<void> _syncWebHistory() async {
-    final canGoBack = await _controller?.canGoBack() ?? false;
-    if (mounted && canGoBack != _webCanGoBack) {
-      setState(() => _webCanGoBack = canGoBack);
-    }
-  }
-
-  void _returnToTerminal() {
-    final navigator = Navigator.of(context);
-    if (!navigator.canPop()) return;
-    final route = ModalRoute.of(context);
-    if (route != null && route.popDisposition == RoutePopDisposition.doNotPop) {
-      navigator.removeRoute(route);
-      return;
-    }
-    navigator.pop();
-  }
-
   Future<void> _publishPushTokenToWeb() async {
     final controller = _controller;
     final token = PushNotificationService.currentToken;
@@ -152,8 +116,7 @@ class _PosWebViewPageState extends State<PosWebViewPage> {
 
     final encodedToken = jsonEncode(token);
     await controller.evaluateJavascript(
-      source:
-          '''
+      source: '''
 window.__flutterFcmToken = $encodedToken;
 window.__flutterPushBridge = {
   getToken: function() { return window.__flutterFcmToken; }

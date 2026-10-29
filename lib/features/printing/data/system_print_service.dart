@@ -24,11 +24,9 @@ class PrintException implements Exception {
 }
 
 class SystemPrintService implements PrintService {
-  SystemPrintService({
-    HtmlPdfRenderer? renderer,
-    ReceiptArchive? archive,
-  }) : _renderer = renderer ?? HtmlPdfRenderer(),
-       _archive = archive ?? const ReceiptArchive();
+  SystemPrintService({HtmlPdfRenderer? renderer, ReceiptArchive? archive})
+    : _renderer = renderer ?? HtmlPdfRenderer(),
+      _archive = archive ?? ReceiptArchive();
 
   final HtmlPdfRenderer _renderer;
   final ReceiptArchive _archive;
@@ -47,17 +45,23 @@ class SystemPrintService implements PrintService {
       );
 
       String? archivedPath;
+      String? archiveWarning;
       if (_persistsForVerification) {
-        final file = await _wrapStage(
-          'archive receipt PDF',
-          request,
-          () => _archive.save(
-            fileName: request.jobId ?? request.title,
-            bytes: receipt.bytes,
-          ),
-        );
-        archivedPath = file.path;
-        _trace('archived receipt PDF at $archivedPath', request);
+        try {
+          final file = await _wrapStage(
+            'archive receipt PDF',
+            request,
+            () => _archive.save(
+              fileName: request.jobId ?? request.title,
+              bytes: receipt.bytes,
+            ),
+          );
+          archivedPath = file.path;
+          _trace('archived receipt PDF at $archivedPath', request);
+        } on PrintException catch (error) {
+          archiveWarning = error.message;
+          _trace('receipt archive unavailable: $archiveWarning', request);
+        }
       }
 
       if (request.printerIp != null) {
@@ -69,43 +73,18 @@ class SystemPrintService implements PrintService {
           );
         }
 
-        try {
-          await _wrapStage(
-            'send network print job',
-            request,
-            () => _printNetworkWithRetry(
-              request: request,
-              pdfBytes: receipt.bytes,
-            ),
-          );
-          return PrintResult.success(
-            jobId: request.jobId,
-            printer: request.printerIp,
-            archivedPath: archivedPath,
-          );
-        } catch (_) {
-          _trace(
-            'network print failed; opening system print dialog',
-            request,
-          );
-          final printed = await _wrapStage(
-            'open system print dialog',
-            request,
-            () => Printing.layoutPdf(
-              name: request.title,
-              format: receipt.format,
-              dynamicLayout: false,
-              onLayout: (_) async => receipt.bytes,
-            ),
-          );
-          if (!printed) throw const PrintException('The print was not completed.');
-
-          return PrintResult.success(
-            jobId: request.jobId,
-            printer: null,
-            archivedPath: archivedPath,
-          );
-        }
+        await _wrapStage(
+          'send network print job',
+          request,
+          () =>
+              _printNetworkWithRetry(request: request, pdfBytes: receipt.bytes),
+        );
+        return PrintResult.success(
+          jobId: request.jobId,
+          printer: request.printerIp,
+          archivedPath: archivedPath,
+          warning: archiveWarning,
+        );
       }
 
       final info = await Printing.info();
@@ -130,12 +109,15 @@ class SystemPrintService implements PrintService {
             onLayout: (_) async => receipt.bytes,
           ),
         );
-        if (!printed) throw const PrintException('The print was not completed.');
+        if (!printed) {
+          throw const PrintException('The print was not completed.');
+        }
 
         return PrintResult.success(
           jobId: request.jobId,
           printer: printer.name,
           archivedPath: archivedPath,
+          warning: archiveWarning,
         );
       }
 
@@ -155,6 +137,7 @@ class SystemPrintService implements PrintService {
         jobId: request.jobId,
         printer: null,
         archivedPath: archivedPath,
+        warning: archiveWarning,
       );
     } catch (error) {
       _trace('print failed: $error', request);
@@ -195,7 +178,10 @@ class SystemPrintService implements PrintService {
         // failure could reprint a partial receipt, so it is never retried.
         lastError = error;
         if (attempt == maxAttempts) break;
-        _trace('network printer busy; retrying ($attempt/$maxAttempts)', request);
+        _trace(
+          'network printer busy; retrying ($attempt/$maxAttempts)',
+          request,
+        );
         await Future<void>.delayed(Duration(milliseconds: 150 * attempt));
       }
     }
@@ -227,6 +213,7 @@ class SystemPrintService implements PrintService {
   void _trace(String message, PrintRequest request) {
     debugPrint(
       '[print][job:${request.jobId ?? '-'}][printer:${request.printerName ?? '-'}] '
+      '[host:${request.printerIp ?? '-'}] '
       '$message',
     );
   }
