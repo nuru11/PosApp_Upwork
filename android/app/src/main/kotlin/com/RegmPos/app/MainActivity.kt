@@ -1,4 +1,4 @@
-package com.example.pointofsalesapp
+package com.RegmPos.app
 
 import io.flutter.embedding.android.FlutterActivity
 
