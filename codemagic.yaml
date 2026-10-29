@@ -1,0 +1,69 @@
+# App Store workflow for PosApp.
+#
+# One-time setup in Codemagic before the first build:
+# 1. Team settings > Integrations: add an App Store Connect API key
+#    named exactly "codemagic", with App Manager access.
+# 2. Team settings > codemagic.yaml settings > Code signing identities:
+#    fetch an Apple Distribution certificate and an App Store profile
+#    for bundle id com.RegmPos.app.
+# 3. Create the app record in App Store Connect for com.RegmPos.app
+#    (screenshots, privacy policy, and category are still required
+#    before Apple will accept a review submission).
+# 4. On this app, click Check for configuration file, then start
+#    "iOS App Store".
+#
+# Optional push config: add a secret variable group named "firebase"
+# with FIREBASE_API_KEY, FIREBASE_APP_ID, FIREBASE_MESSAGING_SENDER_ID,
+# FIREBASE_PROJECT_ID, and FIREBASE_STORAGE_BUCKET, then add
+# "firebase" under environment.groups below.
+
+workflows:
+  ios-app-store:
+    name: iOS App Store
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: codemagic
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.RegmPos.app
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    cache:
+      cache_paths:
+        - $HOME/.pub-cache
+        - $CM_BUILD_DIR/ios/Pods
+    scripts:
+      - name: Set up code signing settings on Xcode project
+        script: xcode-project use-profiles
+      - name: Get Flutter packages
+        script: flutter pub get
+      - name: Install CocoaPods dependencies
+        script: find . -name "Podfile" -execdir pod install \;
+      - name: Build signed IPA
+        script: |
+          DEFINES=()
+          if [ -n "${FIREBASE_API_KEY:-}" ]; then
+            DEFINES+=(
+              --dart-define=FIREBASE_API_KEY="$FIREBASE_API_KEY"
+              --dart-define=FIREBASE_APP_ID="$FIREBASE_APP_ID"
+              --dart-define=FIREBASE_MESSAGING_SENDER_ID="$FIREBASE_MESSAGING_SENDER_ID"
+              --dart-define=FIREBASE_PROJECT_ID="$FIREBASE_PROJECT_ID"
+              --dart-define=FIREBASE_STORAGE_BUCKET="${FIREBASE_STORAGE_BUCKET:-}"
+            )
+          fi
+          flutter build ipa --release \
+            --export-options-plist=/Users/builder/export_options.plist \
+            "${DEFINES[@]}"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        submit_to_app_store: true
+        cancel_previous_submissions: true
+        release_type: MANUAL
