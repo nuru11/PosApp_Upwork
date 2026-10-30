@@ -100,6 +100,22 @@ class _PosWebViewPageState extends State<PosWebViewPage> {
                   message: _error!,
                   onRetry: () => _controller?.reload(),
                 ),
+              Positioned(
+                left: 12,
+                right: 12,
+                bottom: 12,
+                child: ValueListenableBuilder<PrintDiagnostic?>(
+                  valueListenable: widget.printBridge.diagnostic,
+                  builder: (context, diagnostic, _) {
+                    if (diagnostic == null) return const SizedBox.shrink();
+                    return _PrintDiagnosticView(
+                      diagnostic: diagnostic,
+                      onDismiss: () =>
+                          widget.printBridge.diagnostic.value = null,
+                    );
+                  },
+                ),
+              ),
             ],
           ),
         ),
@@ -116,7 +132,8 @@ class _PosWebViewPageState extends State<PosWebViewPage> {
 
     final encodedToken = jsonEncode(token);
     await controller.evaluateJavascript(
-      source: '''
+      source:
+          '''
 window.__flutterFcmToken = $encodedToken;
 window.__flutterPushBridge = {
   getToken: function() { return window.__flutterFcmToken; }
@@ -125,6 +142,59 @@ window.dispatchEvent(new CustomEvent('flutter-fcm-token', {
   detail: { token: $encodedToken }
 }));
 ''',
+    );
+  }
+}
+
+class _PrintDiagnosticView extends StatelessWidget {
+  const _PrintDiagnosticView({
+    required this.diagnostic,
+    required this.onDismiss,
+  });
+
+  final PrintDiagnostic diagnostic;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final backgroundColor = diagnostic.isError
+        ? colorScheme.errorContainer
+        : colorScheme.surfaceContainerHighest;
+    final foregroundColor = diagnostic.isError
+        ? colorScheme.onErrorContainer
+        : colorScheme.onSurface;
+
+    return Material(
+      color: backgroundColor,
+      elevation: 8,
+      borderRadius: BorderRadius.circular(12),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 180),
+        child: Padding(
+          padding: const EdgeInsetsDirectional.fromSTEB(16, 12, 8, 12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    diagnostic.message,
+                    style: TextStyle(color: foregroundColor),
+                    textDirection: TextDirection.ltr,
+                    textAlign: TextAlign.left,
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: 'إغلاق',
+                onPressed: onDismiss,
+                icon: Icon(Icons.close, color: foregroundColor),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

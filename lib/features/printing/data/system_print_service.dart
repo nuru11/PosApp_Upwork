@@ -153,11 +153,14 @@ class SystemPrintService implements PrintService {
       transport: NetworkPrinterTransport(
         host: request.printerIp!,
         port: request.printerPort ?? 9100,
+        timeout: const Duration(seconds: 8),
       ),
       config: SragPrinterConfig(
         paper: _paperFor(request.paperWidthMm),
         chunkSize: 8 * 1024,
         chunkDelay: Duration.zero,
+        feedLines: 2,
+        cutAfterPrint: true,
       ),
     );
     await printer.printPdf(pdfBytes);
@@ -167,25 +170,35 @@ class SystemPrintService implements PrintService {
     required PrintRequest request,
     required Uint8List pdfBytes,
   }) async {
-    const maxAttempts = 5;
+    // The connect retry window is deliberately long (~20s) so the first print
+    // after install survives the iOS local-network permission prompt: iOS
+    // blocks the first connection to a LAN printer until the user taps Allow.
+    const maxAttempts = 8;
     Object? lastError;
     for (var attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         await _printNetwork(request: request, pdfBytes: pdfBytes);
         return;
       } on PrinterConnectionException catch (error) {
-        // Only connection (printer busy) is safe to retry; a mid-stream write
-        // failure could reprint a partial receipt, so it is never retried.
+        // Only connection failures are safe to retry; nothing was sent yet, so
+        // the printer cannot reprint a partial receipt. A mid-stream write
+        // failure throws a different exception and is never retried here.
         lastError = error;
         if (attempt == maxAttempts) break;
         _trace(
-          'network printer busy; retrying ($attempt/$maxAttempts)',
+          'cannot reach printer; retrying ($attempt/$maxAttempts)',
           request,
         );
-        await Future<void>.delayed(Duration(milliseconds: 150 * attempt));
+        final delayMs = (attempt * 1000).clamp(1000, 3000);
+        await Future<void>.delayed(Duration(milliseconds: delayMs));
       }
     }
-    throw PrintException('Network printer is busy: $lastError');
+    throw PrintException(
+      'Cannot reach the network printer at '
+      '${request.printerIp}:${request.printerPort ?? 9100}. '
+      'Check that the device and printer are on the same network and that '
+      'local network access is allowed for this app. ($lastError)',
+    );
   }
 
   SragPaper _paperFor(double? widthMm) {
@@ -213,7 +226,7 @@ class SystemPrintService implements PrintService {
   void _trace(String message, PrintRequest request) {
     debugPrint(
       '[print][job:${request.jobId ?? '-'}][printer:${request.printerName ?? '-'}] '
-      '[host:${request.printerIp ?? '-'}] '
+      '[endpoint:${request.printerIp ?? '-'}:${request.printerPort ?? 9100}] '
       '$message',
     );
   }

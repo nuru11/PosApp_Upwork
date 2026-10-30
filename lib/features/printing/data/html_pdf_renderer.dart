@@ -23,6 +23,14 @@ class HtmlPdfRenderer {
   final HtmlToPdfConverter _nativeConverter;
   final HtmlContentSizer _sizer;
 
+  // Extra paper height added below the measured content so a tiny overflow
+  // cannot push the receipt onto a second, equally tall blank page.
+  static const double _overflowGuardMm = 6.0;
+
+  // Minimal page height so a near-zero measurement cannot produce an invalid
+  // page; real receipts are always taller than this floor.
+  static const double _minHeightMm = 10.0;
+
   Future<RenderedReceipt> render({
     required String html,
     required double? paperWidthMm,
@@ -36,10 +44,7 @@ class HtmlPdfRenderer {
       html: preparedHtml,
       paperWidthMm: resolvedPaperWidthMm,
     );
-    final resolvedHeightMm = _resolvePaperHeightMm(
-      measuredHeightMm: heightMm,
-      paperWidthMm: resolvedPaperWidthMm,
-    );
+    final resolvedHeightMm = _resolvePaperHeightMm(measuredHeightMm: heightMm);
     debugPrint(
       '[print][size] requestedWidthMm=$paperWidthMm '
       'resolvedWidthMm=$resolvedPaperWidthMm '
@@ -76,7 +81,10 @@ class HtmlPdfRenderer {
     }
     // printing currently exposes no non-deprecated equivalent for HTML input.
     // ignore: deprecated_member_use
-    final bytes = await Printing.convertHtml(html: preparedHtml, format: format);
+    final bytes = await Printing.convertHtml(
+      html: preparedHtml,
+      format: format,
+    );
     return RenderedReceipt(bytes: bytes, format: format);
   }
 
@@ -92,6 +100,11 @@ html, body {
   padding: 0 !important;
 }
 html, body, body * { box-sizing: border-box; }
+/* Collapse trailing bottom whitespace so the measured height matches the
+   rendered height; an unmeasured bottom margin is the usual cause of a second,
+   blank page before the cut. */
+body *:last-child { margin-bottom: 0 !important; }
+body { padding-bottom: 0 !important; }
 </style>''';
     final additions = StringBuffer();
     if (!html.contains(RegExp(r'<base\s', caseSensitive: false))) {
@@ -99,7 +112,10 @@ html, body, body * { box-sizing: border-box; }
     }
     additions.write(printStyle);
 
-    final headMatch = RegExp(r'<head[^>]*>', caseSensitive: false).firstMatch(html);
+    final headMatch = RegExp(
+      r'<head[^>]*>',
+      caseSensitive: false,
+    ).firstMatch(html);
     if (headMatch != null) {
       final insertAt = headMatch.end;
       return '${html.substring(0, insertAt)}$additions${html.substring(insertAt)}';
@@ -108,14 +124,14 @@ html, body, body * { box-sizing: border-box; }
     return '<head>$additions</head>$html';
   }
 
-  double _resolvePaperHeightMm({
-    required double measuredHeightMm,
-    required double paperWidthMm,
-  }) {
-    if (measuredHeightMm > paperWidthMm) {
-      return measuredHeightMm;
-    }
-    return paperWidthMm + 1;
+  double _resolvePaperHeightMm({required double measuredHeightMm}) {
+    // Keep the receipt height dynamic: it always follows the measured content
+    // so a short kitchen order is not padded up to a fixed page height. A small
+    // overflow guard is added so the native HTML-to-PDF converter cannot push
+    // a trailing margin onto a second, equally tall blank page, and a minimal
+    // floor protects against a degenerate near-zero measurement.
+    final guardedHeightMm = measuredHeightMm + _overflowGuardMm;
+    return guardedHeightMm < _minHeightMm ? _minHeightMm : guardedHeightMm;
   }
 
   double _resolvePaperWidthMm({
@@ -138,16 +154,22 @@ html, body, body * { box-sizing: border-box; }
 
   double? _parseTemplatePaperWidthMm(String html) {
     for (final pattern in _millimeterPatterns) {
-      final match = RegExp(pattern, caseSensitive: false, dotAll: true)
-          .firstMatch(html);
+      final match = RegExp(
+        pattern,
+        caseSensitive: false,
+        dotAll: true,
+      ).firstMatch(html);
       if (match != null) {
         return double.parse(match.group(1)!);
       }
     }
 
     for (final pattern in _pixelPatterns) {
-      final match = RegExp(pattern, caseSensitive: false, dotAll: true)
-          .firstMatch(html);
+      final match = RegExp(
+        pattern,
+        caseSensitive: false,
+        dotAll: true,
+      ).firstMatch(html);
       if (match != null) {
         final pixels = double.parse(match.group(1)!);
         return pixels / (96 / 25.4);
