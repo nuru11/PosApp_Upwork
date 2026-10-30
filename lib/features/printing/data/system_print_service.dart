@@ -6,10 +6,12 @@ import 'package:printing/printing.dart';
 import 'package:srag_printer/srag_printer.dart' hide PrintResult;
 
 import 'html_pdf_renderer.dart';
+import 'ios_raster_budget.dart';
 import 'local_network_permission.dart';
 import 'print_breadcrumbs.dart';
 import 'receipt_archive.dart';
 import '../domain/print_request.dart';
+import '../presentation/print_measurement_host.dart';
 
 abstract interface class PrintService {
   Future<PrintResult> print(PrintRequest request);
@@ -100,7 +102,7 @@ class SystemPrintService implements PrintService {
           request,
           () =>
               _printNetworkWithRetry(request: request, pdfBytes: receipt.bytes),
-          timeout: const Duration(seconds: 45),
+          timeout: const Duration(seconds: 90),
         );
         return PrintResult.success(
           jobId: request.jobId,
@@ -222,7 +224,7 @@ class SystemPrintService implements PrintService {
     // A few connect retries give the first print after install time to survive
     // the iOS local-network permission prompt (iOS blocks the first connection
     // to a LAN printer until the user taps Allow). The total stays well under
-    // the 45s stage timeout so a blocked job never freezes the print queue.
+    // the 90s stage timeout so a blocked job never freezes the print queue.
     const maxAttempts = 4;
     Object? lastError;
     for (var attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -263,10 +265,9 @@ class SystemPrintService implements PrintService {
   // the printer head width.
   //
   // Android keeps srag's pdfx-based rasterizer, which is proven to work there.
-  // iOS must not use pdfx: on iOS it miscomputes the bitmap size and crashes in
-  // Foundation's Data allocation (EXC_BREAKPOINT on queue io.scer.pdf_renderer).
-  // Instead iOS rasterizes with the printing package (pdfium) and resizes to the
-  // head width in Dart, so the image dimensions can never overflow.
+  // iOS must not rasterize the whole receipt in one call. Printing.raster and
+  // pdfx both allocate width * height * 4 from the PDF page box, and a tall
+  // WKWebView page kills the process. iOS prints short PDF slices instead.
   Future<List<Uint8List>> _rasterize(
     PrintRequest request,
     Uint8List pdfBytes,
@@ -275,22 +276,63 @@ class SystemPrintService implements PrintService {
     if (defaultTargetPlatform != TargetPlatform.iOS) {
       return PdfRasterRenderer(config: _configFor(request)).render(pdfBytes);
     }
+    return _rasterizeIosSlices(request, headDots);
+  }
+
+  Future<List<Uint8List>> _rasterizeIosSlices(
+    PrintRequest request,
+    int headDots,
+  ) async {
+    final prepared = _renderer.prepareHtml(request.html);
+    final widthMm = _renderer.resolvePaperWidthMm(
+      html: prepared,
+      paperWidthMm: request.paperWidthMm,
+    );
+    final slices = await PrintMeasurementHost.renderPdfSlices(
+      html: prepared,
+      paperWidthMm: widthMm,
+    );
+    if (slices == null || slices.isEmpty) {
+      throw const PrintException(
+        'Could not rasterize the receipt for printing.',
+      );
+    }
 
     final frames = <Uint8List>[];
-    // 150 dpi keeps a bounded receipt (page height is capped during rendering)
-    // well within a safe bitmap size; the result is then scaled to head width.
-    await for (final page in Printing.raster(pdfBytes, dpi: 150)) {
-      final png = await page.toPng();
-      final decoded = img.decodeImage(png);
-      if (decoded == null) continue;
-      final frame = decoded.width == headDots
-          ? decoded
-          : img.copyResize(
-              decoded,
-              width: headDots,
-              interpolation: img.Interpolation.average,
-            );
-      frames.add(img.encodePng(frame));
+    for (final slice in slices) {
+      PrintBreadcrumbs.mark('convert PDF slice to printer image');
+      final box = PdfPageBox.fromPdf(slice);
+      if (box == null) {
+        throw const PrintException(
+          'Could not rasterize the receipt for printing.',
+        );
+      }
+      final dpi = IosRasterBudget.dpiFor(
+        headDots: headDots,
+        pageWidthPoints: box.width,
+      );
+      if (!IosRasterBudget.withinPixelBudget(
+        pageWidthPoints: box.width,
+        pageHeightPoints: box.height,
+        dpi: dpi,
+      )) {
+        throw const PrintException(
+          'Receipt page is too large to rasterize on iOS.',
+        );
+      }
+      await for (final page in Printing.raster(slice, dpi: dpi)) {
+        final png = await page.toPng();
+        final decoded = img.decodeImage(png);
+        if (decoded == null) continue;
+        final frame = decoded.width == headDots
+            ? decoded
+            : img.copyResize(
+                decoded,
+                width: headDots,
+                interpolation: img.Interpolation.average,
+              );
+        frames.add(img.encodePng(frame));
+      }
     }
     if (frames.isEmpty) {
       throw const PrintException(

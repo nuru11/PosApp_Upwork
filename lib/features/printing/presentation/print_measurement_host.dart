@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -46,6 +47,20 @@ class PrintMeasurementHost extends StatefulWidget {
     return state._renderPdf(html: html, paperWidthMm: paperWidthMm);
   }
 
+  /// iOS only: exports [html] as short PDF pages so each page can be rasterized
+  /// without allocating one bitmap for the whole receipt.
+  /// Returns `null` when no host is mounted or a slice fails.
+  static Future<List<Uint8List>?> renderPdfSlices({
+    required String html,
+    required double paperWidthMm,
+  }) {
+    final state = _active;
+    if (state == null || defaultTargetPlatform != TargetPlatform.iOS) {
+      return Future.value(null);
+    }
+    return state._renderPdfSlices(html: html, paperWidthMm: paperWidthMm);
+  }
+
   @override
   State<PrintMeasurementHost> createState() => PrintMeasurementHostState();
 }
@@ -57,6 +72,24 @@ class HostRenderedPdf {
   final double heightMm;
 }
 
+class _IosPdfLayout {
+  const _IosPdfLayout({
+    required this.controller,
+    required this.pointsPerCss,
+    required this.rectX,
+    required this.rectWidth,
+    required this.rectHeight,
+    required this.heightMm,
+  });
+
+  final InAppWebViewController controller;
+  final double pointsPerCss;
+  final double rectX;
+  final double rectWidth;
+  final double rectHeight;
+  final double heightMm;
+}
+
 class PrintMeasurementHostState extends State<PrintMeasurementHost> {
   // CSS pixel is defined as 1/96 inch, and 1 inch = 25.4 mm.
   static const double _cssPxPerMm = 96 / 25.4;
@@ -65,6 +98,10 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
   // the template's own CSS controls the actual printed width in mm.
   static const double _hostWidthPx = 400;
   static const double _hostHeightPx = 4000;
+
+  // Each printer image is one strip this tall. A full receipt rasterized as a
+  // single page is what makes iOS kill the process.
+  static const double _sliceCss = 700;
 
   InAppWebViewController? _controller;
   Completer<void>? _loadCompleter;
@@ -119,6 +156,25 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
     });
   }
 
+  Future<List<Uint8List>?> _renderPdfSlices({
+    required String html,
+    required double paperWidthMm,
+  }) {
+    return _serialized(() async {
+      try {
+        return await _runRenderPdfSlices(
+          html,
+          paperWidthMm,
+        ).timeout(const Duration(seconds: 40));
+      } on TimeoutException {
+        try {
+          await _controller?.stopLoading();
+        } catch (_) {}
+        return null;
+      }
+    });
+  }
+
   Future<bool> _load(InAppWebViewController controller, String html) async {
     final completer = Completer<void>();
     _loadCompleter = completer;
@@ -144,6 +200,60 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
   }
 
   Future<HostRenderedPdf?> _runRenderPdf(
+    String html,
+    double paperWidthMm,
+  ) async {
+    final layout = await _measureIosLayout(html, paperWidthMm);
+    if (layout == null) return null;
+    // One archive page has to fit the host. A taller receipt is printed from
+    // slices instead of this single page.
+    if (layout.rectHeight > _hostHeightPx) return null;
+
+    PrintBreadcrumbs.mark('iOS render: create PDF (WKWebView.createPDF)');
+    final bytes = await _createPdfRect(
+      controller: layout.controller,
+      x: layout.rectX,
+      y: 0,
+      width: layout.rectWidth,
+      height: layout.rectHeight,
+    );
+    if (bytes == null) return null;
+    return HostRenderedPdf(bytes: bytes, heightMm: layout.heightMm);
+  }
+
+  Future<List<Uint8List>?> _runRenderPdfSlices(
+    String html,
+    double paperWidthMm,
+  ) async {
+    final layout = await _measureIosLayout(html, paperWidthMm);
+    if (layout == null) return null;
+
+    final slicePoints = _sliceCss * layout.pointsPerCss;
+    if (slicePoints <= 0) return null;
+    // createPDF rejects a rect that sticks out of the WebView.
+    final captureHeight = math.min(layout.rectHeight, _hostHeightPx);
+    final slices = <Uint8List>[];
+    var y = 0.0;
+    while (y < captureHeight - 0.5) {
+      final height = math.min(slicePoints, captureHeight - y);
+      if (height <= 0.5) break;
+      if (y + height > _hostHeightPx) return null;
+      PrintBreadcrumbs.mark('iOS render: create PDF slice');
+      final bytes = await _createPdfRect(
+        controller: layout.controller,
+        x: layout.rectX,
+        y: y,
+        width: layout.rectWidth,
+        height: height,
+      );
+      if (bytes == null) return null;
+      slices.add(bytes);
+      y += height;
+    }
+    return slices.isEmpty ? null : slices;
+  }
+
+  Future<_IosPdfLayout?> _measureIosLayout(
     String html,
     double paperWidthMm,
   ) async {
@@ -175,30 +285,38 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
     final guardedHeightCss = heightCss + 4 * _cssPxPerMm;
     final rectWidth = widthCss * pointsPerCss;
     final rectHeight = guardedHeightCss * pointsPerCss;
-    // createPDF requires the rect to lie inside the WebView bounds.
-    if (rectHeight > _hostHeightPx || rectWidth > _hostWidthPx) return null;
+    if (rectWidth <= 0 || rectWidth > _hostWidthPx || rectHeight <= 0) {
+      return null;
+    }
     final rectX = (leftCss * pointsPerCss)
         .clamp(0, _hostWidthPx - rectWidth)
         .toDouble();
+    return _IosPdfLayout(
+      controller: controller,
+      pointsPerCss: pointsPerCss,
+      rectX: rectX,
+      rectWidth: rectWidth,
+      rectHeight: rectHeight,
+      heightMm: guardedHeightCss / _cssPxPerMm,
+    );
+  }
 
-    PrintBreadcrumbs.mark('iOS render: create PDF (WKWebView.createPDF)');
+  Future<Uint8List?> _createPdfRect({
+    required InAppWebViewController controller,
+    required double x,
+    required double y,
+    required double width,
+    required double height,
+  }) async {
     final bytes = await controller
         .createPdf(
           pdfConfiguration: PDFConfiguration(
-            rect: InAppWebViewRect(
-              x: rectX,
-              y: 0,
-              width: rectWidth,
-              height: rectHeight,
-            ),
+            rect: InAppWebViewRect(x: x, y: y, width: width, height: height),
           ),
         )
-        .timeout(const Duration(seconds: 15), onTimeout: () => null);
+        .timeout(const Duration(seconds: 12), onTimeout: () => null);
     if (bytes == null || bytes.isEmpty) return null;
-    return HostRenderedPdf(
-      bytes: bytes,
-      heightMm: guardedHeightCss / _cssPxPerMm,
-    );
+    return bytes;
   }
 
   // WKWebView renders screen media while the Android converter renders print

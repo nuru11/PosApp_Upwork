@@ -159,6 +159,17 @@ class HtmlPdfRenderer {
     return RenderedReceipt(bytes: bytes, format: format);
   }
 
+  /// HTML with the print stylesheet the iOS slice path and [render] both use.
+  String prepareHtml(String html) => _prepareHtml(html);
+
+  /// Paper width in millimeters, from the print plan or the template CSS.
+  double resolvePaperWidthMm({
+    required String html,
+    required double? paperWidthMm,
+  }) {
+    return _resolvePaperWidthMm(html: html, paperWidthMm: paperWidthMm);
+  }
+
   String _prepareHtml(String html) {
     final baseTag = '<base href="${AppConfig.webUrl}">';
     const printStyle = '''<style data-print-agent>
