@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_native_html_to_pdf/flutter_native_html_to_pdf.dart';
 import 'package:pdf/pdf.dart';
@@ -26,6 +28,12 @@ class HtmlPdfRenderer {
   // Extra paper height added below the measured content so a tiny overflow
   // cannot push the receipt onto a second, equally tall blank page.
   static const double _overflowGuardMm = 6.0;
+
+  // iOS measures content height in a separate WebView than the one the native
+  // converter paginates with, so the two can disagree by a few millimetres. A
+  // larger guard on iOS keeps the receipt on a single page from the first
+  // render, which is what prevents the endless roll / missing cut.
+  static const double _iosOverflowGuardMm = 20.0;
 
   // Minimal page height so a near-zero measurement cannot produce an invalid
   // page; real receipts are always taller than this floor.
@@ -58,19 +66,42 @@ class HtmlPdfRenderer {
 
     if (defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS) {
-      final bytes = await _nativeConverter.convertHtmlToPdfBytes(
+      // iOS renders through UIPrintPageRenderer, which paginates any content
+      // taller than the page we pass in. Each PDF page then becomes a separate
+      // ESC/POS image frame with a single cut only after the last one, so a
+      // multi-page PDF makes the thermal roll feed endlessly without cutting.
+      // Force a single page by re-rendering tall enough to hold all content.
+      var targetHeightMm = resolvedHeightMm;
+      var bytes = await _convertNative(
         html: preparedHtml,
-        pageSize: PdfPageSize.fromMillimeters(
+        widthMm: resolvedPaperWidthMm,
+        heightMm: targetHeightMm,
+      );
+      var pageCount = _countPdfPages(bytes);
+      var attempt = 0;
+      while (pageCount > 1 && attempt < 3) {
+        targetHeightMm = targetHeightMm * pageCount + _overflowGuardMm;
+        bytes = await _convertNative(
+          html: preparedHtml,
           widthMm: resolvedPaperWidthMm,
-          heightMm: resolvedHeightMm,
-          name:
-              'Receipt ${resolvedPaperWidthMm.round()}x${resolvedHeightMm.round()}mm',
-        ),
+          heightMm: targetHeightMm,
+        );
+        pageCount = _countPdfPages(bytes);
+        attempt++;
+      }
+      debugPrint(
+        '[print][pdf] finalHeightMm=$targetHeightMm pages=$pageCount '
+        'reRenders=$attempt',
       );
       if (bytes.isEmpty) {
         throw StateError('The operating system could not render the receipt.');
       }
-      return RenderedReceipt(bytes: bytes, format: format);
+      final finalFormat = PdfPageFormat(
+        resolvedPaperWidthMm * PdfPageFormat.mm,
+        targetHeightMm * PdfPageFormat.mm,
+        marginAll: 0,
+      );
+      return RenderedReceipt(bytes: bytes, format: finalFormat);
     }
 
     final info = await Printing.info();
@@ -130,8 +161,43 @@ body { padding-bottom: 0 !important; }
     // overflow guard is added so the native HTML-to-PDF converter cannot push
     // a trailing margin onto a second, equally tall blank page, and a minimal
     // floor protects against a degenerate near-zero measurement.
-    final guardedHeightMm = measuredHeightMm + _overflowGuardMm;
+    final guard = defaultTargetPlatform == TargetPlatform.iOS
+        ? _iosOverflowGuardMm
+        : _overflowGuardMm;
+    final guardedHeightMm = measuredHeightMm + guard;
     return guardedHeightMm < _minHeightMm ? _minHeightMm : guardedHeightMm;
+  }
+
+  Future<Uint8List> _convertNative({
+    required String html,
+    required double widthMm,
+    required double heightMm,
+  }) {
+    return _nativeConverter.convertHtmlToPdfBytes(
+      html: html,
+      pageSize: PdfPageSize.fromMillimeters(
+        widthMm: widthMm,
+        heightMm: heightMm,
+        name: 'Receipt ${widthMm.round()}x${heightMm.round()}mm',
+      ),
+    );
+  }
+
+  // Counts page objects in a PDF without a full parser. UIKit/Android PDF output
+  // keeps page dictionaries uncompressed, so matching "/Type /Page" (but not
+  // "/Type /Pages") reliably reports how many pages the converter produced. The
+  // Pages-tree "/Count" entry is used as a fallback.
+  int _countPdfPages(Uint8List bytes) {
+    final text = latin1.decode(bytes, allowInvalid: true);
+    final pageObjects = RegExp(
+      r'/Type\s*/Page(?![a-zA-Z])',
+    ).allMatches(text).length;
+    if (pageObjects > 0) return pageObjects;
+    final countMatch = RegExp(r'/Count\s+(\d+)').firstMatch(text);
+    if (countMatch != null) {
+      return int.tryParse(countMatch.group(1)!) ?? 1;
+    }
+    return 1;
   }
 
   double _resolvePaperWidthMm({

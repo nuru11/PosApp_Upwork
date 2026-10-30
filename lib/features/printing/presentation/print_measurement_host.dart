@@ -88,7 +88,7 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
     );
 
     try {
-      await completer.future.timeout(const Duration(seconds: 20));
+      await completer.future.timeout(const Duration(seconds: 10));
     } on TimeoutException {
       return null;
     } finally {
@@ -97,11 +97,21 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
       if (identical(_loadCompleter, completer)) _loadCompleter = null;
     }
 
-    for (var attempt = 0; attempt < 20; attempt++) {
-      final result = await controller.callAsyncJavaScript(
-        functionBody: _probeJs(paperWidthMm),
-      );
-      final heightPx = result?.value is num ? (result!.value as num).toDouble() : 0.0;
+    // Bounded by an overall deadline so a stalled measurement finishes well
+    // before the render stage timeout (60s) and never serializes behind the
+    // next print job on the shared measurement queue.
+    final deadline = DateTime.now().add(const Duration(seconds: 18));
+    for (
+      var attempt = 0;
+      attempt < 20 && DateTime.now().isBefore(deadline);
+      attempt++
+    ) {
+      final result = await controller
+          .callAsyncJavaScript(functionBody: _probeJs(paperWidthMm))
+          .timeout(const Duration(seconds: 4), onTimeout: () => null);
+      final heightPx = result?.value is num
+          ? (result!.value as num).toDouble()
+          : 0.0;
       if (heightPx > 0) {
         return heightPx / _cssPxPerMm;
       }
@@ -156,7 +166,8 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
   // consistent even if the template relies on the viewport width itself.
   // Runs as an async function body via callAsyncJavaScript: evaluateJavascript
   // never awaits a returned Promise on Android, so it always yields 0.
-  String _probeJs(double paperWidthMm) => '''
+  String _probeJs(double paperWidthMm) =>
+      '''
   const measureHeight = () => {
     const body = document.body;
     let maxBottom = 0;

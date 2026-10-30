@@ -78,9 +78,20 @@ class HtmlContentSizer {
   }
 
   Future<double> _measureWithRetry(InAppWebViewController controller) async {
-    for (var attempt = 0; attempt < 20; attempt++) {
-      final result = await controller.callAsyncJavaScript(functionBody: _probeJs);
-      final heightPx = result?.value is num ? (result!.value as num).toDouble() : 0.0;
+    // Bounded by an overall deadline so a stalled measurement finishes well
+    // before the render stage timeout and never blocks the next print job.
+    final deadline = DateTime.now().add(const Duration(seconds: 18));
+    for (
+      var attempt = 0;
+      attempt < 20 && DateTime.now().isBefore(deadline);
+      attempt++
+    ) {
+      final result = await controller
+          .callAsyncJavaScript(functionBody: _probeJs)
+          .timeout(const Duration(seconds: 4), onTimeout: () => null);
+      final heightPx = result?.value is num
+          ? (result!.value as num).toDouble()
+          : 0.0;
       if (heightPx > 0) return heightPx;
       await Future<void>.delayed(const Duration(milliseconds: 250));
     }

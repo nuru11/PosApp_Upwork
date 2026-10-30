@@ -42,6 +42,7 @@ class SystemPrintService implements PrintService {
           html: request.html,
           paperWidthMm: request.paperWidthMm,
         ),
+        timeout: const Duration(seconds: 60),
       );
 
       String? archivedPath;
@@ -55,6 +56,7 @@ class SystemPrintService implements PrintService {
               fileName: request.jobId ?? request.title,
               bytes: receipt.bytes,
             ),
+            timeout: const Duration(seconds: 15),
           );
           archivedPath = file.path;
           _trace('archived receipt PDF at $archivedPath', request);
@@ -78,6 +80,7 @@ class SystemPrintService implements PrintService {
           request,
           () =>
               _printNetworkWithRetry(request: request, pdfBytes: receipt.bytes),
+          timeout: const Duration(seconds: 45),
         );
         return PrintResult.success(
           jobId: request.jobId,
@@ -149,12 +152,13 @@ class SystemPrintService implements PrintService {
     required PrintRequest request,
     required Uint8List pdfBytes,
   }) async {
+    final transport = NetworkPrinterTransport(
+      host: request.printerIp!,
+      port: request.printerPort ?? 9100,
+      timeout: const Duration(seconds: 8),
+    );
     final printer = SragPrinter(
-      transport: NetworkPrinterTransport(
-        host: request.printerIp!,
-        port: request.printerPort ?? 9100,
-        timeout: const Duration(seconds: 8),
-      ),
+      transport: transport,
       config: SragPrinterConfig(
         paper: _paperFor(request.paperWidthMm),
         chunkSize: 8 * 1024,
@@ -163,17 +167,34 @@ class SystemPrintService implements PrintService {
         cutAfterPrint: true,
       ),
     );
-    await printer.printPdf(pdfBytes);
+    try {
+      // Hard deadline on the whole send. On timeout we close the socket so a
+      // half-sent job cannot keep printing in the background (which would make
+      // an operator reprint produce a duplicate receipt).
+      await printer.printPdf(pdfBytes).timeout(const Duration(seconds: 20));
+    } on TimeoutException {
+      await transport.close();
+      throw PrintException(
+        'Timed out sending the receipt to '
+        '${request.printerIp}:${request.printerPort ?? 9100}.',
+      );
+    } catch (_) {
+      // Ensure the socket is always released; a lingering connection can block
+      // the next job on printers that accept only one connection at a time.
+      await transport.close();
+      rethrow;
+    }
   }
 
   Future<void> _printNetworkWithRetry({
     required PrintRequest request,
     required Uint8List pdfBytes,
   }) async {
-    // The connect retry window is deliberately long (~20s) so the first print
-    // after install survives the iOS local-network permission prompt: iOS
-    // blocks the first connection to a LAN printer until the user taps Allow.
-    const maxAttempts = 8;
+    // A few connect retries give the first print after install time to survive
+    // the iOS local-network permission prompt (iOS blocks the first connection
+    // to a LAN printer until the user taps Allow). The total stays well under
+    // the 45s stage timeout so a blocked job never freezes the print queue.
+    const maxAttempts = 4;
     Object? lastError;
     for (var attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
@@ -196,8 +217,9 @@ class SystemPrintService implements PrintService {
     throw PrintException(
       'Cannot reach the network printer at '
       '${request.printerIp}:${request.printerPort ?? 9100}. '
-      'Check that the device and printer are on the same network and that '
-      'local network access is allowed for this app. ($lastError)',
+      'On iPhone/iPad, allow Local Network access for this app '
+      '(Settings > Privacy & Security > Local Network), and make sure the '
+      'device and printer are on the same Wi-Fi network. ($lastError)',
     );
   }
 
@@ -211,11 +233,20 @@ class SystemPrintService implements PrintService {
   Future<T> _wrapStage<T>(
     String stage,
     PrintRequest request,
-    FutureOr<T> Function() action,
-  ) async {
+    FutureOr<T> Function() action, {
+    Duration? timeout,
+  }) async {
     try {
       _trace(stage, request);
-      return await action();
+      final result = Future<T>.value(action());
+      if (timeout == null) return await result;
+      return await result.timeout(
+        timeout,
+        onTimeout: () => throw PrintException(
+          'Stage "$stage" did not finish within ${timeout.inSeconds}s. '
+          'The device may be stuck rendering, or the printer is not responding.',
+        ),
+      );
     } on PrintException {
       rethrow;
     } catch (error) {
