@@ -6,6 +6,7 @@ import 'package:flutter_native_html_to_pdf/flutter_native_html_to_pdf.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pointofsalesapp/features/printing/data/html_content_sizer.dart';
 import 'package:pointofsalesapp/features/printing/data/html_pdf_renderer.dart';
+import 'package:pointofsalesapp/features/printing/presentation/print_measurement_host.dart';
 
 void main() {
   tearDown(() {
@@ -80,6 +81,7 @@ void main() {
       final renderer = HtmlPdfRenderer(
         nativeConverter: converter,
         sizer: _FakeHtmlContentSizer(heightMm: 40),
+        hostPdfRenderer: ({required html, required paperWidthMm}) async => null,
       );
 
       final receipt = await renderer.render(
@@ -92,6 +94,39 @@ void main() {
       expect(converter.lastPageCount, 1);
       expect(converter.lastPageSize!.height, greaterThan(120 * pointsPerMm));
       expect(receipt.format.height, greaterThan(120 * PdfPageFormat.mm));
+    },
+  );
+
+  test(
+    'iOS prints from the in-window WebView PDF, not the native converter',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final converter = _FakeHtmlToPdfConverter();
+      String? hostHtml;
+      double? hostWidthMm;
+      final renderer = HtmlPdfRenderer(
+        nativeConverter: converter,
+        sizer: _FakeHtmlContentSizer(heightMm: 40),
+        hostPdfRenderer: ({required html, required paperWidthMm}) async {
+          hostHtml = html;
+          hostWidthMm = paperWidthMm;
+          return HostRenderedPdf(
+            bytes: Uint8List.fromList(latin1.encode('%PDF\n/Type /Page\n')),
+            heightMm: 72,
+          );
+        },
+      );
+
+      final receipt = await renderer.render(
+        html: '<html><head></head><body>Kitchen</body></html>',
+        paperWidthMm: 80,
+      );
+
+      expect(converter.lastPageSize, isNull);
+      expect(hostWidthMm, 80);
+      expect(hostHtml, contains('@page { margin: 0; }'));
+      expect(receipt.format.height, closeTo(72 * PdfPageFormat.mm, 0.01));
+      expect(receipt.format.width, closeTo(80 * PdfPageFormat.mm, 0.01));
     },
   );
 }

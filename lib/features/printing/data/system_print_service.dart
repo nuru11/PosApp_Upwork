@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:printing/printing.dart';
@@ -35,6 +36,13 @@ class SystemPrintService implements PrintService {
   Future<PrintResult> print(PrintRequest request) async {
     try {
       _trace('starting print job', request);
+      if (request.printerIp != null &&
+          defaultTargetPlatform == TargetPlatform.iOS) {
+        // Touch the printer while the receipt renders so the iOS local-network
+        // permission prompt appears immediately and the app is registered,
+        // instead of only after rendering reaches the network stage.
+        unawaited(_touchPrinter(request));
+      }
       final receipt = await _wrapStage(
         'render receipt',
         request,
@@ -183,6 +191,21 @@ class SystemPrintService implements PrintService {
       // the next job on printers that accept only one connection at a time.
       await transport.close();
       rethrow;
+    }
+  }
+
+  // Opens and immediately closes a connection without sending any bytes, so it
+  // cannot print anything. Failures are expected and ignored.
+  Future<void> _touchPrinter(PrintRequest request) async {
+    try {
+      final socket = await Socket.connect(
+        request.printerIp!,
+        request.printerPort ?? 9100,
+        timeout: const Duration(seconds: 3),
+      );
+      socket.destroy();
+    } catch (error) {
+      _trace('printer touch (permission prompt) failed: $error', request);
     }
   }
 

@@ -45,6 +45,8 @@ class LocalNetworkPrimer {
 
   // Builds a small set of LAN addresses to poke: this device's own Wi-Fi IPs and
   // the likely gateway (x.x.x.1), which reliably counts as local-network access.
+  // Cellular interfaces (pdp_ip*) are skipped: they are not the local network
+  // and probing them never surfaces the prompt.
   Future<List<String>> _localTargets() async {
     final targets = <String>{};
     final interfaces = await NetworkInterface.list(
@@ -52,8 +54,10 @@ class LocalNetworkPrimer {
       includeLoopback: false,
     );
     for (final interface in interfaces) {
+      if (interface.name.startsWith('pdp_ip')) continue;
       for (final address in interface.addresses) {
         final ip = address.address;
+        if (!_isPrivateLan(ip)) continue;
         targets.add(ip);
         final lastDot = ip.lastIndexOf('.');
         if (lastDot > 0) {
@@ -62,5 +66,15 @@ class LocalNetworkPrimer {
       }
     }
     return targets.toList();
+  }
+
+  bool _isPrivateLan(String ip) {
+    final parts = ip.split('.').map(int.tryParse).toList();
+    if (parts.length != 4 || parts.any((part) => part == null)) return false;
+    final a = parts[0]!;
+    final b = parts[1]!;
+    return a == 10 ||
+        (a == 172 && b >= 16 && b <= 31) ||
+        (a == 192 && b == 168);
   }
 }

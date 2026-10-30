@@ -104,7 +104,7 @@ printer supplied by the backend print plan.
 The returned promise resolves to:
 
 ```json
-{"success":true,"jobId":"...","printer":"SunmiPrinter","error":null}
+{"success":true,"jobId":"...","printer":"SunmiPrinter","error":null,"warning":null}
 ```
 
 Print failures reject the promise so the existing Angular execution service
@@ -125,7 +125,7 @@ Windows builds require Windows Developer Mode because Flutter plugins use
 symbolic links during build. HTML-to-PDF capability is checked at runtime;
 platforms that do not expose it return an explicit bridge error.
 
-### Android network agent
+### Mobile network agent (Android and iOS)
 
 For a LAN/Wi-Fi thermal printer, include network routing in the print target:
 
@@ -143,3 +143,18 @@ does not look up a system printer by name. The PDF receipt is rasterized into
 ESC/POS printer commands before it is sent. `deviceNameEn` remains useful as a
 label, but it is not used for network routing. When `ipAddress` is absent, the
 existing named system/QZ printing path is used.
+
+On iOS, receipt archives are stored in the app documents directory. Archive
+failures are returned as warnings and do not prevent the print job. If a
+configured network printer cannot be reached, the job fails explicitly rather
+than silently switching to the system print dialog.
+
+### iOS local network permission (first print)
+
+iOS 14+ blocks the first TCP connection to a LAN printer until the user grants
+local network access. The app declares `NSLocalNetworkUsageDescription` and
+`NSBonjourServices` (`_pdl-datastream._tcp`, `_printer._tcp`, `_ipp._tcp`) in
+`ios/Runner/Info.plist`, and the network connect retries for about 20 seconds so
+the very first print survives the permission prompt. If printing still fails,
+confirm **Settings → Privacy & Security → Local Network** is enabled for the
+app, and that the iPhone/iPad and printer share the same Wi-Fi network.

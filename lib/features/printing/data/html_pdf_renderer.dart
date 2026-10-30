@@ -6,7 +6,14 @@ import 'package:pdf/pdf.dart';
 import 'package:printing/printing.dart';
 
 import '../../../core/config/app_config.dart';
+import '../presentation/print_measurement_host.dart';
 import 'html_content_sizer.dart';
+
+typedef HostPdfRenderer =
+    Future<HostRenderedPdf?> Function({
+      required String html,
+      required double paperWidthMm,
+    });
 
 class RenderedReceipt {
   const RenderedReceipt({required this.bytes, required this.format});
@@ -19,11 +26,14 @@ class HtmlPdfRenderer {
   HtmlPdfRenderer({
     HtmlToPdfConverter? nativeConverter,
     HtmlContentSizer? sizer,
+    HostPdfRenderer? hostPdfRenderer,
   }) : _nativeConverter = nativeConverter ?? HtmlToPdfConverter(),
-       _sizer = sizer ?? const HtmlContentSizer();
+       _sizer = sizer ?? const HtmlContentSizer(),
+       _hostPdfRenderer = hostPdfRenderer ?? PrintMeasurementHost.renderPdf;
 
   final HtmlToPdfConverter _nativeConverter;
   final HtmlContentSizer _sizer;
+  final HostPdfRenderer _hostPdfRenderer;
 
   // Extra paper height added below the measured content so a tiny overflow
   // cannot push the receipt onto a second, equally tall blank page.
@@ -48,6 +58,33 @@ class HtmlPdfRenderer {
       html: preparedHtml,
       paperWidthMm: paperWidthMm,
     );
+
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      // The native converter renders in a UIWindow that is not attached to any
+      // scene, so in this scene-based app WebKit suspends it and the job hangs.
+      // Render with WKWebView.createPDF on the WebView mounted in the app's own
+      // window instead: one page, cropped to the paper width.
+      final hosted = await _hostPdfRenderer(
+        html: preparedHtml,
+        paperWidthMm: resolvedPaperWidthMm,
+      );
+      if (hosted != null) {
+        debugPrint(
+          '[print][pdf] iOS createPDF widthMm=$resolvedPaperWidthMm '
+          'heightMm=${hosted.heightMm} pages=${_countPdfPages(hosted.bytes)}',
+        );
+        return RenderedReceipt(
+          bytes: hosted.bytes,
+          format: PdfPageFormat(
+            resolvedPaperWidthMm * PdfPageFormat.mm,
+            hosted.heightMm * PdfPageFormat.mm,
+            marginAll: 0,
+          ),
+        );
+      }
+      debugPrint('[print][pdf] iOS createPDF unavailable; using fallback');
+    }
+
     final heightMm = await _sizer.measureHeightMm(
       html: preparedHtml,
       paperWidthMm: resolvedPaperWidthMm,
