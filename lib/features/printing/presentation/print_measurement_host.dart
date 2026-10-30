@@ -152,6 +152,8 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
           await _controller?.stopLoading();
         } catch (_) {}
         return null;
+      } finally {
+        await _clearMeasurementPage();
       }
     });
   }
@@ -171,6 +173,8 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
           await _controller?.stopLoading();
         } catch (_) {}
         return null;
+      } finally {
+        await _clearMeasurementPage();
       }
     });
   }
@@ -197,6 +201,19 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
       // job's completer during continuous printing.
       if (identical(_loadCompleter, completer)) _loadCompleter = null;
     }
+  }
+
+  // Drops the receipt document so the measurement view cannot stay white
+  // over the order screen. Does not touch the POS WebView.
+  Future<void> _clearMeasurementPage() async {
+    final controller = _controller;
+    if (controller == null) return;
+    try {
+      await _load(
+        controller,
+        '<html><head></head><body style="background:transparent"></body></html>',
+      );
+    } catch (_) {}
   }
 
   Future<HostRenderedPdf?> _runRenderPdf(
@@ -405,12 +422,17 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
 
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       // Opacity(0) skips painting its child, so on iOS the platform view would
-      // never be added to the window and WebKit suspends it: loads and
-      // JavaScript never complete. Keep it fully composited but underneath the
-      // opaque app content, where it is never visible.
+      // never be added to the window and WebKit suspends it. Keep a real size
+      // and leave it in the window, but off the left edge: iOS draws this
+      // native WebView above the POS, and a white receipt page would cover
+      // the order screen.
       return Stack(
         children: [
-          Positioned(left: 0, top: 0, child: IgnorePointer(child: webView)),
+          Positioned(
+            left: -_hostWidthPx,
+            top: 0,
+            child: IgnorePointer(child: webView),
+          ),
           widget.child,
         ],
       );
@@ -442,10 +464,14 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
   window.scrollTo(0, 0);
   const root = document.documentElement;
   root.style.setProperty('width', '${paperWidthMm}mm', 'important');
+  root.style.setProperty('height', 'auto', 'important');
+  root.style.setProperty('min-height', '0', 'important');
   root.style.setProperty('margin-left', '0', 'important');
   root.style.setProperty('margin-right', 'auto', 'important');
   if (document.body) {
     document.body.style.setProperty('width', '${paperWidthMm}mm', 'important');
+    document.body.style.setProperty('height', 'auto', 'important');
+    document.body.style.setProperty('min-height', '0', 'important');
     document.body.style.setProperty('margin', '0', 'important');
   }
   await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -464,23 +490,26 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
   ]);
   await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 
-  const body = document.body;
-  let maxBottom = 0;
-  for (const element of Array.from(body?.querySelectorAll('*') || [])) {
+  const viewportH = window.innerHeight;
+  // A box as tall as this 4000px host is a 100%/100vh wrapper, not ticket
+  // content. Use its children so the printed height matches the receipt.
+  const contentBottom = (element) => {
+    if (!element || !element.getBoundingClientRect) return 0;
     const rect = element.getBoundingClientRect();
-    if (rect && Number.isFinite(rect.bottom)) maxBottom = Math.max(maxBottom, rect.bottom);
-  }
-  if (body?.childNodes.length) {
-    const range = document.createRange();
-    range.selectNodeContents(body);
-    const bottom = range.getBoundingClientRect().bottom;
-    if (Number.isFinite(bottom)) maxBottom = Math.max(maxBottom, bottom);
-  }
+    const children = Array.from(element.children || []);
+    const fillsViewport = Number.isFinite(rect.height) && rect.height >= viewportH - 1;
+    if (fillsViewport && children.length) {
+      return children.reduce((max, child) => Math.max(max, contentBottom(child)), 0);
+    }
+    let max = Number.isFinite(rect.bottom) ? Math.max(0, rect.bottom) : 0;
+    for (const child of children) max = Math.max(max, contentBottom(child));
+    return max;
+  };
   const rootRect = root.getBoundingClientRect();
-  const bodyRect = body ? body.getBoundingClientRect() : rootRect;
+  const bodyRect = document.body ? document.body.getBoundingClientRect() : rootRect;
   return {
     ok: true,
-    height: Math.ceil(maxBottom),
+    height: Math.ceil(contentBottom(document.body)),
     left: Math.max(0, Math.floor(Math.min(rootRect.left, bodyRect.left) + window.scrollX)),
     viewport: window.innerWidth,
   };
