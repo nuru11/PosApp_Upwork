@@ -4,11 +4,14 @@ import 'package:flutter/material.dart';
 
 import 'app/pos_app.dart';
 import 'features/printing/data/local_network_primer.dart';
+import 'features/printing/data/print_breadcrumbs.dart';
 import 'features/web_shell/presentation/push_notification_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await PushNotificationService.initialize();
+  // Reads the step an unfinished print job was in when the app last closed.
+  await PrintBreadcrumbs.init();
   runApp(PosApp());
   // Surface the iOS local-network permission prompt at startup (not during the
   // first print), so network print jobs are never blocked waiting for the user

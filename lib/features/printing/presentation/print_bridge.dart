@@ -3,11 +3,20 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
+import '../data/print_breadcrumbs.dart';
 import '../data/system_print_service.dart';
 import '../domain/print_request.dart';
 
 class PrintBridge {
-  PrintBridge(this._printService);
+  PrintBridge(this._printService) {
+    final step = PrintBreadcrumbs.previousUnfinishedStep;
+    if (step != null && step.isNotEmpty) {
+      diagnostic.value = PrintDiagnostic(
+        message: 'أُغلق التطبيق أثناء الطباعة السابقة في المرحلة:\n$step',
+        isError: true,
+      );
+    }
+  }
 
   static const handlerName = 'printAgent';
 

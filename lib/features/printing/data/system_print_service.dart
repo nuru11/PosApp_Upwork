@@ -1,10 +1,13 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:image/image.dart' as img;
 import 'package:printing/printing.dart';
 import 'package:srag_printer/srag_printer.dart' hide PrintResult;
 
 import 'html_pdf_renderer.dart';
+import 'local_network_permission.dart';
+import 'print_breadcrumbs.dart';
 import 'receipt_archive.dart';
 import '../domain/print_request.dart';
 
@@ -35,6 +38,12 @@ class SystemPrintService implements PrintService {
   Future<PrintResult> print(PrintRequest request) async {
     try {
       _trace('starting print job', request);
+      PrintBreadcrumbs.begin();
+      // Start the iOS local-network permission check right away, in parallel
+      // with rendering, so the prompt appears immediately on the first print.
+      final permission = request.printerIp != null
+          ? LocalNetworkPermission.request()
+          : null;
       final receipt = await _wrapStage(
         'render receipt',
         request,
@@ -73,6 +82,17 @@ class SystemPrintService implements PrintService {
             'Unsupported network printer protocol "$protocol". '
             'Use raw or escpos for port 9100.',
           );
+        }
+
+        if (permission != null) {
+          PrintBreadcrumbs.mark('check local network permission');
+          if (await permission == LocalNetworkStatus.denied) {
+            throw const PrintException(
+              'iOS يمنع التطبيق من الوصول إلى الطابعة على الشبكة المحلية. '
+              'فعّل "Point of Sale" من: الإعدادات > الخصوصية والأمان > '
+              'الشبكة المحلية، ثم أعد الطباعة.',
+            );
+          }
         }
 
         await _wrapStage(
@@ -145,12 +165,22 @@ class SystemPrintService implements PrintService {
     } catch (error) {
       _trace('print failed: $error', request);
       return PrintResult.failure(jobId: request.jobId, error: '$error');
+    } finally {
+      PrintBreadcrumbs.clear();
     }
   }
 
+  SragPrinterConfig _configFor(PrintRequest request) => SragPrinterConfig(
+    paper: _paperFor(request.paperWidthMm),
+    chunkSize: 8 * 1024,
+    chunkDelay: Duration.zero,
+    feedLines: 2,
+    cutAfterPrint: true,
+  );
+
   Future<void> _printNetwork({
     required PrintRequest request,
-    required Uint8List pdfBytes,
+    required List<Uint8List> frames,
   }) async {
     final transport = NetworkPrinterTransport(
       host: request.printerIp!,
@@ -159,19 +189,14 @@ class SystemPrintService implements PrintService {
     );
     final printer = SragPrinter(
       transport: transport,
-      config: SragPrinterConfig(
-        paper: _paperFor(request.paperWidthMm),
-        chunkSize: 8 * 1024,
-        chunkDelay: Duration.zero,
-        feedLines: 2,
-        cutAfterPrint: true,
-      ),
+      config: _configFor(request),
     );
     try {
+      PrintBreadcrumbs.mark('send receipt to printer');
       // Hard deadline on the whole send. On timeout we close the socket so a
       // half-sent job cannot keep printing in the background (which would make
       // an operator reprint produce a duplicate receipt).
-      await printer.printPdf(pdfBytes).timeout(const Duration(seconds: 20));
+      await printer.printImages(frames).timeout(const Duration(seconds: 20));
     } on TimeoutException {
       await transport.close();
       throw PrintException(
@@ -190,6 +215,10 @@ class SystemPrintService implements PrintService {
     required PrintRequest request,
     required Uint8List pdfBytes,
   }) async {
+    // Rasterize once, before connecting, so retries never redo this work.
+    PrintBreadcrumbs.mark('convert PDF to printer image');
+    final frames = await _rasterize(request, pdfBytes);
+
     // A few connect retries give the first print after install time to survive
     // the iOS local-network permission prompt (iOS blocks the first connection
     // to a LAN printer until the user taps Allow). The total stays well under
@@ -198,7 +227,7 @@ class SystemPrintService implements PrintService {
     Object? lastError;
     for (var attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        await _printNetwork(request: request, pdfBytes: pdfBytes);
+        await _printNetwork(request: request, frames: frames);
         return;
       } on PrinterConnectionException catch (error) {
         // Only connection failures are safe to retry; nothing was sent yet, so
@@ -230,6 +259,47 @@ class SystemPrintService implements PrintService {
     return SragPaper.mm80Wide();
   }
 
+  // Converts the receipt PDF into ESC/POS-ready image frames sized exactly to
+  // the printer head width.
+  //
+  // Android keeps srag's pdfx-based rasterizer, which is proven to work there.
+  // iOS must not use pdfx: on iOS it miscomputes the bitmap size and crashes in
+  // Foundation's Data allocation (EXC_BREAKPOINT on queue io.scer.pdf_renderer).
+  // Instead iOS rasterizes with the printing package (pdfium) and resizes to the
+  // head width in Dart, so the image dimensions can never overflow.
+  Future<List<Uint8List>> _rasterize(
+    PrintRequest request,
+    Uint8List pdfBytes,
+  ) async {
+    final headDots = _paperFor(request.paperWidthMm).headDots;
+    if (defaultTargetPlatform != TargetPlatform.iOS) {
+      return PdfRasterRenderer(config: _configFor(request)).render(pdfBytes);
+    }
+
+    final frames = <Uint8List>[];
+    // 150 dpi keeps a bounded receipt (page height is capped during rendering)
+    // well within a safe bitmap size; the result is then scaled to head width.
+    await for (final page in Printing.raster(pdfBytes, dpi: 150)) {
+      final png = await page.toPng();
+      final decoded = img.decodeImage(png);
+      if (decoded == null) continue;
+      final frame = decoded.width == headDots
+          ? decoded
+          : img.copyResize(
+              decoded,
+              width: headDots,
+              interpolation: img.Interpolation.average,
+            );
+      frames.add(img.encodePng(frame));
+    }
+    if (frames.isEmpty) {
+      throw const PrintException(
+        'Could not rasterize the receipt for printing.',
+      );
+    }
+    return frames;
+  }
+
   Future<T> _wrapStage<T>(
     String stage,
     PrintRequest request,
@@ -238,6 +308,7 @@ class SystemPrintService implements PrintService {
   }) async {
     try {
       _trace(stage, request);
+      PrintBreadcrumbs.mark(stage);
       final result = Future<T>.value(action());
       if (timeout == null) return await result;
       return await result.timeout(

@@ -2,19 +2,16 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import 'local_network_permission.dart';
+
 /// Triggers the iOS local-network permission prompt early, at app startup,
 /// instead of on the first print.
 ///
 /// iOS 14+ blocks the first access to the local network (a LAN printer socket)
-/// until the user taps "Allow". If that prompt only appears on the first print,
-/// the first jobs are blocked and pile up as "printing..." until the user taps
-/// Allow — exactly the "stuck for a few tries, then suddenly prints" behaviour.
-///
-/// A plain outbound TCP connection attempt to a LAN address surfaces the prompt
-/// without needing the multicast entitlement (which `joinMulticast` would
-/// require on iOS 14+, and which Apple must approve). The connection is expected
-/// to fail — only the attempt matters — and `NSLocalNetworkUsageDescription`
-/// must be present in Info.plist for the prompt to appear.
+/// until the user taps "Allow". The native Bonjour-based check
+/// ([LocalNetworkPermission]) reliably shows the prompt; plain Dart sockets do
+/// not, so a TCP probe is kept only as a fallback if the native check is
+/// unavailable. `NSLocalNetworkUsageDescription` must be in Info.plist.
 class LocalNetworkPrimer {
   const LocalNetworkPrimer();
 
@@ -25,6 +22,9 @@ class LocalNetworkPrimer {
 
   Future<void> warmUp() async {
     if (defaultTargetPlatform != TargetPlatform.iOS) return;
+    if (await LocalNetworkPermission.request() != LocalNetworkStatus.unknown) {
+      return;
+    }
     try {
       final targets = await _localTargets();
       for (final ip in targets) {
@@ -45,6 +45,8 @@ class LocalNetworkPrimer {
 
   // Builds a small set of LAN addresses to poke: this device's own Wi-Fi IPs and
   // the likely gateway (x.x.x.1), which reliably counts as local-network access.
+  // Cellular interfaces (pdp_ip*) are skipped: they are not the local network
+  // and probing them never surfaces the prompt.
   Future<List<String>> _localTargets() async {
     final targets = <String>{};
     final interfaces = await NetworkInterface.list(
@@ -52,8 +54,10 @@ class LocalNetworkPrimer {
       includeLoopback: false,
     );
     for (final interface in interfaces) {
+      if (interface.name.startsWith('pdp_ip')) continue;
       for (final address in interface.addresses) {
         final ip = address.address;
+        if (!_isPrivateLan(ip)) continue;
         targets.add(ip);
         final lastDot = ip.lastIndexOf('.');
         if (lastDot > 0) {
@@ -62,5 +66,15 @@ class LocalNetworkPrimer {
       }
     }
     return targets.toList();
+  }
+
+  bool _isPrivateLan(String ip) {
+    final parts = ip.split('.').map(int.tryParse).toList();
+    if (parts.length != 4 || parts.any((part) => part == null)) return false;
+    final a = parts[0]!;
+    final b = parts[1]!;
+    return a == 10 ||
+        (a == 172 && b >= 16 && b <= 31) ||
+        (a == 192 && b == 168);
   }
 }

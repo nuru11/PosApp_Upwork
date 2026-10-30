@@ -1,17 +1,19 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../../../core/config/app_config.dart';
+import '../data/print_breadcrumbs.dart';
 
-/// Hosts a permanently mounted, invisible [InAppWebView] used to measure the
-/// intrinsic content height of backend print templates.
+/// Hosts a permanently mounted [InAppWebView] used to measure backend print
+/// templates and, on iOS, to export them as PDF.
 ///
 /// Android's headless WebView never receives a real layout pass, which makes
 /// `scrollHeight` unreliable for templates that rely on layout (e.g. `height:
-/// 100%`). Mounting a real WebView inside the widget tree (hidden via
-/// [Visibility]) guarantees the platform performs an actual layout pass.
+/// 100%`). On iOS the WebView must be attached to the app's window, otherwise
+/// WebKit suspends it and loads/JavaScript never complete.
 class PrintMeasurementHost extends StatefulWidget {
   const PrintMeasurementHost({required this.child, super.key});
 
@@ -30,8 +32,29 @@ class PrintMeasurementHost extends StatefulWidget {
     return state._measureHeightMm(html: html, paperWidthMm: paperWidthMm);
   }
 
+  /// iOS only: renders [html] in the mounted WebView and exports it with
+  /// `WKWebView.createPDF` as a single page cropped to [paperWidthMm].
+  /// Returns `null` when unavailable so the caller can fall back.
+  static Future<HostRenderedPdf?> renderPdf({
+    required String html,
+    required double paperWidthMm,
+  }) {
+    final state = _active;
+    if (state == null || defaultTargetPlatform != TargetPlatform.iOS) {
+      return Future.value(null);
+    }
+    return state._renderPdf(html: html, paperWidthMm: paperWidthMm);
+  }
+
   @override
   State<PrintMeasurementHost> createState() => PrintMeasurementHostState();
+}
+
+class HostRenderedPdf {
+  const HostRenderedPdf({required this.bytes, required this.heightMm});
+
+  final Uint8List bytes;
+  final double heightMm;
 }
 
 class PrintMeasurementHostState extends State<PrintMeasurementHost> {
@@ -45,7 +68,14 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
 
   InAppWebViewController? _controller;
   Completer<void>? _loadCompleter;
-  Future<double?> _queue = Future.value(null);
+  Future<void> _queue = Future.value();
+
+  // Serializes every use of the single shared WebView (measure or render).
+  Future<T> _serialized<T>(Future<T> Function() task) {
+    final result = _queue.then((_) => task(), onError: (_) => task());
+    _queue = result.then<void>((_) {}, onError: (_) {});
+    return result;
+  }
 
   @override
   void initState() {
@@ -65,37 +95,148 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
     required String html,
     required double paperWidthMm,
   }) {
-    final result = _queue.then(
-      (_) => _runMeasurement(html, paperWidthMm),
-      onError: (_) => _runMeasurement(html, paperWidthMm),
+    return _serialized(() => _runMeasurement(html, paperWidthMm));
+  }
+
+  Future<HostRenderedPdf?> _renderPdf({
+    required String html,
+    required double paperWidthMm,
+  }) {
+    return _serialized(() async {
+      try {
+        // Hard cap for the whole job so a stalled WebView can never hold the
+        // shared queue (and every later print) hostage.
+        return await _runRenderPdf(
+          html,
+          paperWidthMm,
+        ).timeout(const Duration(seconds: 35));
+      } on TimeoutException {
+        try {
+          await _controller?.stopLoading();
+        } catch (_) {}
+        return null;
+      }
+    });
+  }
+
+  Future<bool> _load(InAppWebViewController controller, String html) async {
+    final completer = Completer<void>();
+    _loadCompleter = completer;
+    try {
+      await controller
+          .loadData(
+            data: html,
+            mimeType: 'text/html',
+            encoding: 'utf-8',
+            baseUrl: WebUri(AppConfig.webUrl),
+            historyUrl: WebUri(AppConfig.webUrl),
+          )
+          .timeout(const Duration(seconds: 5));
+      await completer.future.timeout(const Duration(seconds: 10));
+      return true;
+    } on TimeoutException {
+      return false;
+    } finally {
+      // Detach so a late onLoadStop from this load cannot complete the next
+      // job's completer during continuous printing.
+      if (identical(_loadCompleter, completer)) _loadCompleter = null;
+    }
+  }
+
+  Future<HostRenderedPdf?> _runRenderPdf(
+    String html,
+    double paperWidthMm,
+  ) async {
+    final controller = _controller;
+    if (controller == null) return null;
+
+    // A unique token lets the layout script confirm it is reading this job's
+    // document, not a late navigation from the previous one.
+    final token = '${DateTime.now().microsecondsSinceEpoch}';
+    final printHtml = _iosPrintHtml(html, token);
+    PrintBreadcrumbs.mark('iOS render: load receipt HTML');
+    if (!await _load(controller, printHtml)) return null;
+
+    PrintBreadcrumbs.mark('iOS render: measure layout');
+    final result = await controller
+        .callAsyncJavaScript(functionBody: _layoutJs(paperWidthMm, token))
+        .timeout(const Duration(seconds: 15), onTimeout: () => null);
+    final value = result?.value;
+    if (value is! Map || value['ok'] != true) return null;
+    final heightCss = (value['height'] as num?)?.toDouble() ?? 0;
+    final leftCss = (value['left'] as num?)?.toDouble() ?? 0;
+    final viewportCss = (value['viewport'] as num?)?.toDouble() ?? 0;
+    if (heightCss <= 0 || viewportCss <= 0) return null;
+
+    // DOM values are CSS px; createPDF's rect is in view points. They differ
+    // if WebKit scales the layout viewport, so convert explicitly.
+    final pointsPerCss = _hostWidthPx / viewportCss;
+    final widthCss = paperWidthMm * _cssPxPerMm;
+    final guardedHeightCss = heightCss + 4 * _cssPxPerMm;
+    final rectWidth = widthCss * pointsPerCss;
+    final rectHeight = guardedHeightCss * pointsPerCss;
+    // createPDF requires the rect to lie inside the WebView bounds.
+    if (rectHeight > _hostHeightPx || rectWidth > _hostWidthPx) return null;
+    final rectX = (leftCss * pointsPerCss)
+        .clamp(0, _hostWidthPx - rectWidth)
+        .toDouble();
+
+    PrintBreadcrumbs.mark('iOS render: create PDF (WKWebView.createPDF)');
+    final bytes = await controller
+        .createPdf(
+          pdfConfiguration: PDFConfiguration(
+            rect: InAppWebViewRect(
+              x: rectX,
+              y: 0,
+              width: rectWidth,
+              height: rectHeight,
+            ),
+          ),
+        )
+        .timeout(const Duration(seconds: 15), onTimeout: () => null);
+    if (bytes == null || bytes.isEmpty) return null;
+    return HostRenderedPdf(
+      bytes: bytes,
+      heightMm: guardedHeightCss / _cssPxPerMm,
     );
-    _queue = result.then<double?>((value) => value, onError: (_) => null);
-    return result;
+  }
+
+  // WKWebView renders screen media while the Android converter renders print
+  // media, so print-only rules are promoted. A fixed 1:1 viewport keeps CSS px
+  // aligned with view points, and the job token tags this document.
+  String _iosPrintHtml(String html, String token) {
+    final withoutViewport = html.replaceAll(
+      RegExp(
+        r'''<meta[^>]+name\s*=\s*["']?viewport["']?[^>]*>''',
+        caseSensitive: false,
+      ),
+      '',
+    );
+    final media = withoutViewport
+        .replaceAll(
+          RegExp(r'@media\s+print', caseSensitive: false),
+          '@media all',
+        )
+        .replaceAll(
+          RegExp(r'@media\s+screen', caseSensitive: false),
+          '@media not all',
+        );
+    final tags =
+        '<meta name="viewport" content="width=device-width, initial-scale=1, '
+        'maximum-scale=1, user-scalable=no">'
+        '<meta name="print-job" content="$token">';
+    final head = RegExp(r'<head[^>]*>', caseSensitive: false).firstMatch(media);
+    if (head != null) {
+      return '${media.substring(0, head.end)}$tags${media.substring(head.end)}';
+    }
+    return '<head>$tags</head>$media';
   }
 
   Future<double?> _runMeasurement(String html, double paperWidthMm) async {
     final controller = _controller;
     if (controller == null) return null;
 
-    final completer = Completer<void>();
-    _loadCompleter = completer;
-    await controller.loadData(
-      data: html,
-      mimeType: 'text/html',
-      encoding: 'utf-8',
-      baseUrl: WebUri(AppConfig.webUrl),
-      historyUrl: WebUri(AppConfig.webUrl),
-    );
-
-    try {
-      await completer.future.timeout(const Duration(seconds: 10));
-    } on TimeoutException {
-      return null;
-    } finally {
-      // Detach so a late onLoadStop from this load cannot complete the next
-      // measurement's completer during continuous printing.
-      if (identical(_loadCompleter, completer)) _loadCompleter = null;
-    }
+    if (!await _load(controller, html)) return null;
 
     // Bounded by an overall deadline so a stalled measurement finishes well
     // before the render stage timeout (60s) and never serializes behind the
@@ -123,44 +264,109 @@ class PrintMeasurementHostState extends State<PrintMeasurementHost> {
 
   @override
   Widget build(BuildContext context) {
+    final webView = SizedBox(
+      width: _hostWidthPx,
+      height: _hostHeightPx,
+      child: InAppWebView(
+        initialSettings: InAppWebViewSettings(
+          transparentBackground: true,
+          supportZoom: false,
+          useWideViewPort: false,
+          loadWithOverviewMode: false,
+          disableHorizontalScroll: true,
+        ),
+        onWebViewCreated: (controller) => _controller = controller,
+        onLoadStop: (controller, _) {
+          final completer = _loadCompleter;
+          if (completer != null && !completer.isCompleted) {
+            completer.complete();
+          }
+        },
+      ),
+    );
+
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      // Opacity(0) skips painting its child, so on iOS the platform view would
+      // never be added to the window and WebKit suspends it: loads and
+      // JavaScript never complete. Keep it fully composited but underneath the
+      // opaque app content, where it is never visible.
+      return Stack(
+        children: [
+          Positioned(left: 0, top: 0, child: IgnorePointer(child: webView)),
+          widget.child,
+        ],
+      );
+    }
+
     return Stack(
       children: [
         widget.child,
         Positioned(
           left: 0,
           top: 0,
-          child: IgnorePointer(
-            // `Opacity` still performs a real paint pass (unlike `Visibility`),
-            // which is required for the platform WebView to actually composite
-            // and run a real layout pass on Android.
-            child: Opacity(
-              opacity: 0.0,
-              child: SizedBox(
-                width: _hostWidthPx,
-                height: _hostHeightPx,
-                child: InAppWebView(
-                  initialSettings: InAppWebViewSettings(
-                    transparentBackground: true,
-                    supportZoom: false,
-                    useWideViewPort: false,
-                    loadWithOverviewMode: false,
-                    disableHorizontalScroll: true,
-                  ),
-                  onWebViewCreated: (controller) => _controller = controller,
-                  onLoadStop: (controller, _) {
-                    final completer = _loadCompleter;
-                    if (completer != null && !completer.isCompleted) {
-                      completer.complete();
-                    }
-                  },
-                ),
-              ),
-            ),
-          ),
+          child: IgnorePointer(child: Opacity(opacity: 0.0, child: webView)),
         ),
       ],
     );
   }
+
+  // Lays the template out at the paper width, anchored at x=0, and reports its
+  // height, left edge and layout-viewport width (all in CSS px). Inline
+  // `!important` is required to beat the injected `width: 100% !important`.
+  String _layoutJs(double paperWidthMm, String token) =>
+      '''
+  const tokenMeta = () => document.querySelector('meta[name="print-job"]');
+  for (let i = 0; i < 50 && tokenMeta()?.content !== '$token'; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (tokenMeta()?.content !== '$token') return { ok: false };
+
+  window.scrollTo(0, 0);
+  const root = document.documentElement;
+  root.style.setProperty('width', '${paperWidthMm}mm', 'important');
+  root.style.setProperty('margin-left', '0', 'important');
+  root.style.setProperty('margin-right', 'auto', 'important');
+  if (document.body) {
+    document.body.style.setProperty('width', '${paperWidthMm}mm', 'important');
+    document.body.style.setProperty('margin', '0', 'important');
+  }
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  if (document.fonts && document.fonts.ready) {
+    try { await Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 5000))]); } catch (_) {}
+  }
+  const images = Array.from(document.images);
+  await Promise.race([
+    Promise.all(images.map((img) => img.complete
+      ? Promise.resolve()
+      : new Promise((resolve) => {
+          img.addEventListener('load', resolve, { once: true });
+          img.addEventListener('error', resolve, { once: true });
+        }))),
+    new Promise((resolve) => setTimeout(resolve, 6000)),
+  ]);
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+  const body = document.body;
+  let maxBottom = 0;
+  for (const element of Array.from(body?.querySelectorAll('*') || [])) {
+    const rect = element.getBoundingClientRect();
+    if (rect && Number.isFinite(rect.bottom)) maxBottom = Math.max(maxBottom, rect.bottom);
+  }
+  if (body?.childNodes.length) {
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    const bottom = range.getBoundingClientRect().bottom;
+    if (Number.isFinite(bottom)) maxBottom = Math.max(maxBottom, bottom);
+  }
+  const rootRect = root.getBoundingClientRect();
+  const bodyRect = body ? body.getBoundingClientRect() : rootRect;
+  return {
+    ok: true,
+    height: Math.ceil(maxBottom),
+    left: Math.max(0, Math.floor(Math.min(rootRect.left, bodyRect.left) + window.scrollX)),
+    viewport: window.innerWidth,
+  };
+''';
 
   // Forces the template to the requested paper width so measurement is
   // consistent even if the template relies on the viewport width itself.
