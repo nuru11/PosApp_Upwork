@@ -60,12 +60,7 @@ class PrintBridge {
         completer.completeError(PrintBridgeException(result.error));
         return;
       }
-      diagnostic.value = PrintDiagnostic(
-        message: [
-          'أُرسلت مهمة الطباعة بنجاح إلى ${result.printer ?? 'طابعة النظام'}.',
-          if (result.warning != null) 'تحذير: ${result.warning}',
-        ].join('\n'),
-      );
+      diagnostic.value = null;
       completer.complete(result.toJson());
     } catch (error) {
       _reportFailure('$error');
