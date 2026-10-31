@@ -49,6 +49,25 @@ class PrintRequest {
   final int? printerPort;
   final String? printerProtocol;
 
+  PrintRequest copyWith({
+    String? printerName,
+    String? printerIp,
+    int? printerPort,
+    String? printerProtocol,
+    double? paperWidthMm,
+  }) {
+    return PrintRequest(
+      html: html,
+      title: title,
+      paperWidthMm: paperWidthMm ?? this.paperWidthMm,
+      jobId: jobId,
+      printerName: printerName ?? this.printerName,
+      printerIp: printerIp ?? this.printerIp,
+      printerPort: printerPort ?? this.printerPort,
+      printerProtocol: printerProtocol ?? this.printerProtocol,
+    );
+  }
+
   static Map<String, Object?> _asMap(Object? value) =>
       value is Map ? Map<String, Object?>.from(value) : const {};
 

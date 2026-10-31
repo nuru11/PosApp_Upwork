@@ -3,12 +3,17 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
+import '../../terminal/data/printer_settings_store.dart';
+import '../../terminal/domain/saved_printer.dart';
 import '../data/print_breadcrumbs.dart';
 import '../data/system_print_service.dart';
 import '../domain/print_request.dart';
 
 class PrintBridge {
-  PrintBridge(this._printService) {
+  PrintBridge(
+    this._printService, {
+    Future<SavedPrinter?> Function()? loadSavedPrinter,
+  }) : _loadSavedPrinter = loadSavedPrinter ?? PrinterSettingsStore().read {
     final step = PrintBreadcrumbs.previousUnfinishedStep;
     if (step != null && step.isNotEmpty) {
       // diagnostic.value = PrintDiagnostic(
@@ -21,6 +26,7 @@ class PrintBridge {
   static const handlerName = 'printAgent';
 
   final PrintService _printService;
+  final Future<SavedPrinter?> Function() _loadSavedPrinter;
   final ValueNotifier<PrintDiagnostic?> diagnostic =
       ValueNotifier<PrintDiagnostic?>(null);
   Future<void> _queue = Future.value();
@@ -50,9 +56,10 @@ class PrintBridge {
     Completer<Map<String, Object?>> completer,
   ) async {
     try {
-      final request = PrintRequest.fromBridgeMessage(
+      var request = PrintRequest.fromBridgeMessage(
         arguments.isEmpty ? null : arguments.first,
       );
+      request = await _withSavedPrinter(request);
       final result = await _printService.print(request);
       if (completer.isCompleted) return;
       if (!result.success) {
@@ -67,6 +74,16 @@ class PrintBridge {
       if (!completer.isCompleted) {
         completer.completeError(PrintBridgeException('$error'));
       }
+    }
+  }
+
+  Future<PrintRequest> _withSavedPrinter(PrintRequest request) async {
+    if (request.printerIp != null) return request;
+    try {
+      return applySavedPrinter(request, await _loadSavedPrinter());
+    } catch (error) {
+      debugPrint('[print] saved printer unavailable: $error');
+      return request;
     }
   }
 
