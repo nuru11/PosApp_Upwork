@@ -11,10 +11,10 @@ class PrintBridge {
   PrintBridge(this._printService) {
     final step = PrintBreadcrumbs.previousUnfinishedStep;
     if (step != null && step.isNotEmpty) {
-      diagnostic.value = PrintDiagnostic(
-        message: 'أُغلق التطبيق أثناء الطباعة السابقة في المرحلة:\n$step',
-        isError: true,
-      );
+      // diagnostic.value = PrintDiagnostic(
+      //   message: 'أُغلق التطبيق أثناء الطباعة السابقة في المرحلة:\n$step',
+      //   isError: true,
+      // );
     }
   }
 
@@ -33,9 +33,9 @@ class PrintBridge {
   }
 
   Future<Map<String, Object?>> _enqueue(List<Object?> arguments) {
-    diagnostic.value = const PrintDiagnostic(
-      message: 'وصل طلب الطباعة إلى التطبيق، جارٍ تنفيذه.',
-    );
+    // diagnostic.value = const PrintDiagnostic(
+    //   message: 'وصل طلب الطباعة إلى التطبيق، جارٍ تنفيذه.',
+    // );
     final completer = Completer<Map<String, Object?>>();
     // Keep the queue tail as a never-rejecting future so one failed job can
     // never poison the jobs queued after it.
@@ -72,10 +72,10 @@ class PrintBridge {
 
   void _reportFailure(String message) {
     debugPrint('[print][bridge] failed: $message');
-    diagnostic.value = PrintDiagnostic(
-      message: 'فشلت الطباعة:\n$message',
-      isError: true,
-    );
+    // diagnostic.value = PrintDiagnostic(
+    //   message: 'فشلت الطباعة:\n$message',
+    //   isError: true,
+    // );
   }
 }
 
