@@ -22,7 +22,9 @@ class PosApp extends StatelessWidget {
       builder: (context, child) {
         return Directionality(
           textDirection: TextDirection.rtl,
-          child: child ?? const SizedBox.shrink(),
+          child: PrintMeasurementHost(
+            child: child ?? const SizedBox.shrink(),
+          ),
         );
       },
       theme: ThemeData(
@@ -51,11 +53,9 @@ class PosApp extends StatelessWidget {
           ),
         ),
       ),
-      home: PrintMeasurementHost(
-        child: TerminalHomePage(
-          printBridge: _printBridge ?? _ownedPrintBridge,
-          printService: _printService,
-        ),
+      home: TerminalHomePage(
+        printBridge: _printBridge ?? _ownedPrintBridge,
+        printService: _printService,
       ),
     );
   }
