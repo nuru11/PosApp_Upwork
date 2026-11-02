@@ -17,7 +17,7 @@ class PosApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Point of Sale',
+      title: 'RagmPos',
       locale: const Locale('ar'),
       builder: (context, child) {
         return Directionality(

@@ -25,7 +25,7 @@ class LocalAlertService {
         requestSoundPermission: false,
       ),
       windows: WindowsInitializationSettings(
-        appName: 'Point of Sale',
+        appName: 'RagmPos',
         appUserModelId: 'PointOfSale.Terminal.App.1',
         guid: '8f3c1a2e-6b47-4d1a-9c55-2e7b0a4f91d3',
       ),

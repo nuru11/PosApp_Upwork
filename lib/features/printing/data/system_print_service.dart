@@ -91,7 +91,7 @@ class SystemPrintService implements PrintService {
           if (await permission == LocalNetworkStatus.denied) {
             throw const PrintException(
               'iOS يمنع التطبيق من الوصول إلى الطابعة على الشبكة المحلية. '
-              'فعّل "Point of Sale" من: الإعدادات > الخصوصية والأمان > '
+              'فعّل "RagmPos" من: الإعدادات > الخصوصية والأمان > '
               'الشبكة المحلية، ثم أعد الطباعة.',
             );
           }
