@@ -152,8 +152,7 @@ class _PosWebViewPageState extends State<PosWebViewPage> {
     final navigator = Navigator.of(context);
     if (!navigator.canPop()) return;
     final route = ModalRoute.of(context);
-    if (route != null &&
-        route.popDisposition == RoutePopDisposition.doNotPop) {
+    if (route != null && route.popDisposition == RoutePopDisposition.doNotPop) {
       navigator.removeRoute(route);
       return;
     }

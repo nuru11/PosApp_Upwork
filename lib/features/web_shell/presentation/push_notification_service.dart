@@ -46,14 +46,15 @@ class PushNotificationService {
       await _requestPermission();
       await _refreshToken();
 
-      _tokenRefreshSubscription = FirebaseMessaging.instance.onTokenRefresh.listen(
-        (token) {
-          tokenListenable.value = token.trim().isEmpty ? null : token.trim();
-          debugPrint('[push] Token refreshed.');
-        },
-      );
+      _tokenRefreshSubscription = FirebaseMessaging.instance.onTokenRefresh
+          .listen((token) {
+            tokenListenable.value = token.trim().isEmpty ? null : token.trim();
+            debugPrint('[push] Token refreshed.');
+          });
 
-      _foregroundMessageSubscription = FirebaseMessaging.onMessage.listen((message) {
+      _foregroundMessageSubscription = FirebaseMessaging.onMessage.listen((
+        message,
+      ) {
         debugPrint(
           '[push] Foreground message received: '
           'id=${message.messageId ?? '-'} type=${message.data['type'] ?? '-'}',
@@ -90,7 +91,9 @@ class PushNotificationService {
     _foregroundMessageSubscription = null;
   }
 
-  static Future<void> _ensureFirebaseInitialized(FirebaseOptions options) async {
+  static Future<void> _ensureFirebaseInitialized(
+    FirebaseOptions options,
+  ) async {
     if (Firebase.apps.isEmpty) {
       await Firebase.initializeApp(options: options);
     }
@@ -107,7 +110,9 @@ class PushNotificationService {
 
   static Future<void> _refreshToken() async {
     final token = await FirebaseMessaging.instance.getToken();
-    tokenListenable.value = token?.trim().isEmpty ?? true ? null : token!.trim();
+    tokenListenable.value = token?.trim().isEmpty ?? true
+        ? null
+        : token!.trim();
     if (tokenListenable.value != null) {
       debugPrint('[push] Token acquired.');
     }
@@ -131,8 +136,7 @@ class PushNotificationService {
     const projectId = String.fromEnvironment('FIREBASE_PROJECT_ID');
     const storageBucket = String.fromEnvironment('FIREBASE_STORAGE_BUCKET');
 
-    if (
-        apiKey.isEmpty ||
+    if (apiKey.isEmpty ||
         appId.isEmpty ||
         messagingSenderId.isEmpty ||
         projectId.isEmpty) {
